@@ -35,6 +35,10 @@
 
 #include "PICSystem.h"
 #include <MultiRegions/ContField.h>
+#include <cstdlib>
+#include <math.h> // #include <numbers> in C++20
+#include <random>
+#include <iostream>
 
 namespace Nektar
 {
@@ -89,6 +93,10 @@ void PICSystem::v_InitObject()
              "Session file should define parameter kappa.");
     m_session->LoadParameter("kappa", m_kappa, 1.0);
 
+    m_fields[3] = MemoryManager<MultiRegions::ContField>
+        ::AllocateSharedPtr(
+            m_session, m_graph, m_session->GetVariable(3), true, true);
+
     // Assign storage for particle positions.
     for (int i = 0; i < 2; ++i)
     {
@@ -99,22 +107,22 @@ void PICSystem::v_InitObject()
     // Load constant charge from the session file.
     ASSERTL0(m_session->DefinesParameter("charge"),
              "Session file should define parameter charge.");
-    m_session->LoadParameter("alpha", m_charge, 1.0);
+    m_session->LoadParameter("charge", m_charge, 1.0);
 
     // Load constant mass from the session file.
     ASSERTL0(m_session->DefinesParameter("mass"),
              "Session file should define parameter mass.");
-    m_session->LoadParameter("alpha", m_mass, 1.0);
+    m_session->LoadParameter("mass", m_mass, 1.0);
 
     // Load constant numberDensity from the session file.
     ASSERTL0(m_session->DefinesParameter("numberDensity"),
              "Session file should define parameter numberDensity.");
-    m_session->LoadParameter("alpha", m_numberDensity, 1.0);
+    m_session->LoadParameter("numberDensity", m_numberDensity, 1.0);
 
     // Load constant numberDensity from the session file.
     ASSERTL0(m_session->DefinesParameter("numberMacroparticles"),
              "Session file should define parameter numberMacroparticles.");
-    m_session->LoadParameter("alpha", m_numberMacroParticles, 1.0);
+    m_session->LoadParameter("numberMacroparticles", m_numberMacroParticles, 1.0);
 
 
     // Type of advection class to be used. By default, we only support the
@@ -193,7 +201,104 @@ void PICSystem::v_InitObject()
     // C^0 connectivity). These are done again through callbacks.
     m_ode.DefineOdeRhs    (&PICSystem::ExplicitTimeInt, this);
     m_ode.DefineProjection(&PICSystem::DoOdeProjection, this);
+
+    this->DoInitialise(); // this populates the fields with ICs
+
+    this->InitialiseParticles();
+
 }
+
+void PICSystem::InitialiseParticles() {
+
+  std::mt19937_64 rng;
+  std::uniform_real_distribution<NekDouble> f01(0, 1);
+  auto x = Array<OneD, NekDouble>(2);
+  const auto twopi = 2 * M_PI;
+  const auto rho = m_fields[3]; // charge density rho
+  const auto rhoPhys = rho->GetPhys(); // TODO: is this right?
+  for (int j = 0; j < m_numberMacroParticles; ++j) {
+
+    while (true) { // load this particle
+      const auto f = f01(rng);
+      int cellIndex = -1;
+      while (cellIndex < 0) {
+        for (int d = 0; d < 2; ++d) {
+          x[d] = f01(rng) * 5 - 1; // TODO: distribute particles evenly in grid
+        }
+        cellIndex = rho->GetExpIndex(x);
+      }
+      // Chris has some code in his tensor product code that looks like this?
+      const auto rho_x = rho->PhysEvaluate(x, rhoPhys); // TODO: how to do this?!
+
+      if (f <= rho_x) { // accept the particle position
+        for (int d = 0; d < 2; ++d) {
+          m_particlePositions[d][j] = x[d];
+        }
+        const auto r1 = f01(rng); // 1st random number for Box-Muller transform
+        const auto r2 = f01(rng); // 2nd random number for Box-Muller transform
+        // two independent normally distributed random numbers
+        const auto commonPart = std::sqrt(-2 * std::log(r1));
+        m_particleVelocities[0][j] = commonPart * std::cos(twopi * r2);
+        m_particleVelocities[1][j] = commonPart * std::sin(twopi * r2);
+        break;
+      }
+    }
+  }
+
+  // m_fields[3] is rho
+  const auto volume = 1.0; // TODO get proper answer for volume of grid
+  const auto numberPhysicalParticles = this->m_numberDensity * volume;
+  this->m_particleWeight = numberPhysicalParticles / this->m_numberMacroParticles;
+}
+
+void PICSystem::Deposit() {
+
+  auto x = Array<OneD, NekDouble>(2);
+  auto rho = m_fields[3];
+  int currentCellIndex = -1;
+  Array<OneD, NekDouble> cellVector(rho->GetNcoeffs());
+  std::map<int, std::stack<int>> cellIndexToParticleIndex();
+  // assume particles are sorted already by increasing cellIndex
+  for (int j = 0; j < m_numberMacroParticles; ++j) {
+    for (int d = 0; d < 2; ++d) {
+      x[d] = m_particlePositions[d][j];
+    }
+    const auto particleCellIndex = rho->GetExpIndex(x);
+    cellIndexToParticleIndex[particleCellIndex].push(j);
+  }
+  for (auto& cellIndexParticleIndicesPair : cellIndexToParticleIndex) {
+    const auto cellIndex = cellIndexParticleIndicesPair.first;
+    const auto particleIndices = cellIndexParticleIndicesPair.second;
+    while (!particleIndices.empty()) {
+      const auto particleIndex = particleIndices.top();
+      for (int d = 0; d < 2; ++d) {
+        x[d] = m_particlePositions[d][particleIndex];
+      }
+// here be dragons
+// library/StdRegions/StdQuadExp.cpp is useful
+// need to transform x in to this cell's reference space
+// evaluate bases at barycentric coordinates(?)
+      Array<OneD, NekDouble> basesAtX = rho->StdEvaluate(x, rho); // TODO: fix this. evaluate all bases in cell at position x
+      if (particleCellIndex != currentCellIndex) {
+        // this is a new cell
+        if (currentCellIndex > -1) { // we've completed evaluating basis functions in the cell
+          // MultiplyByInvMassMatrix(cellVector, chargeDensityCellCoefficients);
+        }
+        currentCellIndex = particleCellIndex;
+        cellVector = basesAtX;
+      } else {
+        cellVector = cellVector + basesAtX;
+      }
+      particleIndices.pop();
+    }
+
+  }
+
+}
+
+
+
+
 
 /**
  * @brief Evaluate the right-hand side of the ODE system used to integrate in
@@ -358,9 +463,5 @@ Array<OneD, NekDouble> &PICSystem::GetNormalVelocity()
     return m_traceVn;
 }
 
-void PICSystem::InisitiliseParticles()
-{
-
-}
 
 }

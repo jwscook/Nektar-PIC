@@ -63,6 +63,7 @@ public:
         SolverUtils::EquationSystemSharedPtr p = MemoryManager<
             PICSystem>::AllocateSharedPtr(session, graph);
         p->InitObject();
+
         return p;
     }
 
@@ -130,7 +131,9 @@ protected:
 
     virtual void v_InitObject();
 
-    void InisitiliseParticles();
+    void InitialiseParticles();
+
+    void Deposit();
 };
 
 }

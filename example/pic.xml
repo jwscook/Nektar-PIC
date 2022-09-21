@@ -20,7 +20,7 @@
             <P> s                    = 2.0       </P>
             <P> kappa                = 1.0       </P>
             <P> alpha                = 2.0       </P>
-            <P> numberMacroParticles = 1000000   </P>
+            <P> numberMacroParticles = 10000     </P>
             <P> numberDensity        = 1.0       </P>
             <P> charge               = 1.0       </P>
             <P> mass                 = 1.0       </P>
